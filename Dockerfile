@@ -34,9 +34,12 @@ WORKDIR /app
 COPY . /app
 
 # Pre-download Hugging Face ZipVoice model to avoid re-download at runtime
-RUN python3 -c "\
-from huggingface_hub import hf_hub_download; \
-hf_hub_download(repo_id='csukuangfj/zipvoice', filename='zipvoice_distill.pt')"
+# Ensure dependencies are installed
+RUN pip install --no-cache-dir huggingface_hub
+
+# Pre-download Hugging Face ZipVoice model
+RUN python3 -m huggingface_hub download csukuangfj/zipvoice zipvoice_distill.pt --local-dir /models/zipvoice
+
 
 # Expose port
 EXPOSE 8000
