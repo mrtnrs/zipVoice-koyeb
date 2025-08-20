@@ -20,7 +20,7 @@ jobs:
         password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Build Docker image
-      run: docker build -t mrtnrs/zipvoice:latest .
+      run: docker build -t cgdfgdfgdfg/zipvoice:latest .
 
     - name: Push Docker image
-      run: docker push mrtnrs/zipvoice:latest
+      run: docker push cgdfgdfgdfg/zipvoice:latest
