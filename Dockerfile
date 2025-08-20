@@ -5,7 +5,7 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV HF_HUB_DISABLE_TELEMETRY=1
-ENV HF_ENDPOINT=https://hf-mirror.com  # For better connectivity in some regions
+ENV HF_ENDPOINT=https://hf-mirror.com
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
