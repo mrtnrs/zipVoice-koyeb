@@ -4,6 +4,7 @@ import tempfile
 import logging
 import uuid
 import io
+import sys
 from fastapi import FastAPI, Form, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import APIKeyHeader
@@ -67,7 +68,7 @@ def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
         # Build the inference command
         module = "zipvoice.bin.infer_zipvoice_onnx" if use_onnx else "zipvoice.bin.infer_zipvoice"
         cmd = [
-            "python", "-m", module,
+            sys.executable, "-m", module,
             "--model-name", model_name,
             "--prompt-text", voice_info["transcription"],
             "--prompt-wav", voice_info["wav_path"],

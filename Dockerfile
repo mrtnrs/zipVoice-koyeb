@@ -6,6 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV HF_HUB_DISABLE_TELEMETRY=1
 ENV HF_ENDPOINT=https://hf-mirror.com
+ENV HF_HOME=/tmp/huggingface_cache
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
