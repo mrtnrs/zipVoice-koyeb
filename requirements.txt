@@ -1,0 +1,34 @@
+--find-links https://k2-fsa.github.io/icefall/piper_phonemize.html
+-f https://k2-fsa.github.io/k2/cuda.html
+
+k2==1.24.4.dev20241030+cuda12.1.torch2.3.1
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1+cu121
+torchaudio==2.3.1+cu121 -f https://download.pytorch.org/whl/cu121/torch_stable.html
+
+numpy
+lhotse
+huggingface_hub
+safetensors
+tensorboard
+vocos
+
+# Normalization
+cn2an
+inflect
+
+# Tokenization
+jieba
+piper_phonemize
+pypinyin
+setuptools<81
+
+fastapi
+uvicorn
+requests
+python-multipart
+onnxruntime==1.22.1
+
+rq
+redis
