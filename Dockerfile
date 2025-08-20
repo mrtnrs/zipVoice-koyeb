@@ -33,11 +33,22 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir huggingface_hub
 
-# Pre-download Hugging Face ZipVoice model using the correct command
-RUN huggingface-cli download k2-fsa/ZipVoice zipvoice_distill.pt --local-dir /models/zipvoice
+# Prefetch required Hugging Face assets into cache for zipvoice_distill
+# This ensures runtime hf_hub_download calls find them without network
+RUN python3 - << 'PY'
+from huggingface_hub import hf_hub_download
 
-# Alternative if the above doesn't work:
-# RUN python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='k2-fsa/ZipVoice', allow_patterns='zipvoice_distill.pt', local_dir='/models/zipvoice')"
+repo = "k2-fsa/ZipVoice"
+model_dir = "zipvoice_distill"
+
+# PyTorch inference assets
+for fname in ["model.pt", "model.json", "tokens.txt"]:
+    hf_hub_download(repo, filename=f"{model_dir}/{fname}")
+
+# ONNX inference assets (server defaults to ONNX path)
+for fname in ["text_encoder.onnx", "fm_decoder.onnx"]:
+    hf_hub_download(repo, filename=f"{model_dir}/{fname}")
+PY
 
 # Copy app code (after dependencies for better caching)
 COPY . .
