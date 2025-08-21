@@ -39,10 +39,10 @@ RUN pip install --no-cache-dir huggingface_hub
 RUN python3 -c "from huggingface_hub import hf_hub_download; repo='k2-fsa/ZipVoice'; model_dir='zipvoice_distill'; [hf_hub_download(repo, filename=f'{model_dir}/{fname}') for fname in ['model.pt','model.json','tokens.txt','text_encoder.onnx','fm_decoder.onnx']]"
 
 # spaCy English model (small)
-RUN python -m spacy download en_core_web_sm
+RUN python3 -m spacy download en_core_web_sm
 
 # NLTK data for g2p-en and potentially h2p-parser (pre-download for offline runtime)
-RUN python -m nltk.downloader -d /usr/share/nltk_data averaged_perceptron_tagger cmudict punkt
+RUN python3 -m nltk.downloader -d /usr/share/nltk_data averaged_perceptron_tagger cmudict punkt
 
 # Copy app code (after dependencies for better caching)
 COPY . .
