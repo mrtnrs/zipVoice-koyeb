@@ -1,4 +1,3 @@
-# zipvoice/text_preprocess.py
 from __future__ import annotations
 import re
 from typing import List, Dict, Tuple
@@ -8,29 +7,30 @@ from h2p_parser.h2p import H2p
 from g2p_en import G2p
 
 # Load once (safe for a single-process server; if you fork/workers, do this in worker init)
-_NLP = spacy.load("en_core_web_sm", disable=["ner", "lemmatizer"])
+_NLP = spacy.load("en_core_web_sm", disable=["parser", "ner", "lemmatizer"])
+_NLP.add_pipe("sentencizer")
 _H2P = H2p(preload=True)
 _G2P = G2p()
 
 # ARPAbet phone to grapheme (spelling) map for respelling
 # Based on standard correspondences to create unambiguous spellings that TTS should pronounce correctly
 _PHONE_MAP: Dict[str, str] = {
-    # Vowels (chosen to force common pronunciations in English TTS)
-    'AA': 'o',   # as in "odd"
-    'AE': 'a',   # as in "at"
-    'AH': 'u',   # as in "hut"
-    'AO': 'aw',  # as in "ought"
-    'AW': 'ow',  # as in "cow"
-    'AY': 'igh', # as in "high"
-    'EH': 'e',   # as in "ed"
-    'ER': 'ur',  # as in "hurt"
-    'EY': 'ay',  # as in "day"
-    'IH': 'i',   # as in "it"
-    'IY': 'ee',  # as in "eat"
-    'OW': 'o',   # as in "oat"
-    'OY': 'oy',  # as in "toy"
-    'UH': 'oo',  # as in "book"
-    'UW': 'oo',  # as in "boot"
+    # Updated mappings based on common TTS expectations
+    'AA': 'ah',   # "odd" -> "ahd"
+    'AE': 'a',    # "at" -> "at"
+    'AH': 'uh',   # "hut" -> "huht"
+    'AO': 'aw',   # "ought" -> "awt"
+    'AW': 'ow',   # "cow" -> "kow"
+    'AY': 'ai',   # "high" -> "hai"
+    'EH': 'e',    # "ed" -> "ed"
+    'ER': 'er',   # "hurt" -> "hert"
+    'EY': 'ay',   # "day" -> "day"
+    'IH': 'ih',   # "it" -> "iht"
+    'IY': 'ee',   # "eat" -> "eet"
+    'OW': 'oh',   # "oat" -> "oht"
+    'OY': 'oy',   # "toy" -> "toy"
+    'UH': 'oo',   # "book" -> "book"
+    'UW': 'oo',   # "boot" -> "boot"
     # Consonants (mostly direct)
     'B': 'b',
     'CH': 'ch',
@@ -66,61 +66,93 @@ def _phone_to_graph(phone: str) -> str:
     return _PHONE_MAP.get(phone, phone)  # Fallback to phone itself if unknown
 
 def _respell_phones(phones: str, orig: str) -> str:
-    """Convert ARPAbet phones string to respelled word, preserving case."""
+    """Convert ARPAbet phones to respelled word with validation."""
     phone_list = phones.split()
-    graphemes = [_phone_to_graph(re.sub(r'\d', '', p)) for p in phone_list]
+    graphemes = []
+    
+    for p in phone_list:
+        base_phone = re.sub(r'\d', '', p)
+        graph = _PHONE_MAP.get(base_phone)
+        if graph is None:
+            # Fall back to original word if unknown phone
+            return orig
+        graphemes.append(graph)
+    
     new_word = ''.join(graphemes)
-    # Preserve original case
+    
+    # Validate the respelling has vowels
+    if not any(vowel in new_word.lower() for vowel in 'aeiouy'):
+        return orig
+        
+    # Limit length expansion
+    if len(new_word) > len(orig) * 1.5:
+        return orig
+        
+    # Preserve case
     if orig.isupper():
-        new_word = new_word.upper()
+        return new_word.upper()
     elif orig.istitle():
-        new_word = new_word.capitalize()
+        return new_word.capitalize()
     elif orig.islower():
-        new_word = new_word.lower()
+        return new_word.lower()
     else:
-        new_word = new_word.capitalize()  # Default for mixed case
-    return new_word
+        return new_word  # Keep as is for mixed case
 
 def _heteronym_candidates(sent_text: str) -> List[Tuple[int, int, str, str]]:
     """
-    Returns a list of (start, end, orig_word, phones) for heteronyms in this sentence,
-    using h2p to determine the *contextual* pronunciation.
+    Returns a list of (start, end, orig_word, phones) for heteronyms in this sentence.
+    Uses deterministic alignment based on token positions in the replaced text.
     """
     doc = _NLP(sent_text)
-
-    # Build a simple token stream (indices and text) for words only
-    words = [(t.idx, t.idx + len(t.text), t.text, t.lemma_.lower()) for t in doc if t.is_alpha]
-
-    # h2p: replace only heteronyms with {PHONES}
     repl = _H2P.replace_het(sent_text)
-
-    # Extract just the {PHONES} in order
-    phones_in_order = _PHONEME_RE.findall(repl)
-
+    
+    # Get all alpha tokens with their positions
+    words = [(t.idx, t.idx + len(t.text), t.text) for t in doc if t.is_alpha]
+    
+    # Find all {PHONES} in the replaced text
+    phone_matches = list(_PHONEME_RE.finditer(repl))
+    
     out: List[Tuple[int, int, str, str]] = []
-    wi = 0  # index over 'words'
-    for ph in phones_in_order:
-        # Advance to next word (assuming h2p replaces in token order)
-        while wi < len(words) and words[wi][3] not in _H2P.heteronyms:  # Optional: check if known het
-            wi += 1
-        if wi >= len(words):
-            break
-        start, end, orig, lemma = words[wi]
-        out.append((start, end, orig, ph))
-        wi += 1
+    word_idx = 0
+    
+    for match in phone_matches:
+        phones = match.group(1)
+        match_start = match.start()
+        
+        # Count words (non-{PHONES} tokens) before this match
+        pre_text = repl[:match_start]
+        # Count words by splitting and excluding {PHONES}
+        pre_tokens = [t for t in pre_text.split() if not _PHONEME_RE.fullmatch(t)]
+        target_word_idx = len(pre_tokens)
+        
+        # Find the corresponding word
+        if target_word_idx < len(words):
+            start, end, orig = words[target_word_idx]
+            out.append((start, end, orig, phones))
+    
     return out
 
 def _proper_noun_candidates(sent: spacy.tokens.Span) -> List[Tuple[int, int, str, str]]:
     """
-    Returns a list of (start, end, orig_word, phones) for proper nouns (PROPN) in this sentence,
-    using g2p-en to predict phones.
+    Returns sentence-relative spans for proper nouns with filtering.
     """
     out: List[Tuple[int, int, str, str]] = []
+    sent_start = sent.start_char
+    
+    # Common words that shouldn't be respelled even if tagged as PROPN
+    COMMON_PROPN = {"the", "and", "of", "for", "in", "on", "at", "to", "by"}
+    
     for t in sent:
-        if t.pos_ == "PROPN" and t.is_alpha:  # Proper nouns, alphabetic only
-            phones_list = _G2P(t.text.lower())  # g2p-en takes lowercase
+        # Expanded check for proper nouns with punctuation
+        if (t.pos_ == "PROPN" and 
+            re.fullmatch(r"[A-Za-z][A-Za-z'\-]*", t.text) and
+            t.text.lower() not in COMMON_PROPN and
+            len(t.text) >= 3):  # Skip very short proper nouns
+            
+            phones_list = _G2P(t.text.lower())
             phones = ' '.join(phones_list)
-            out.append((t.idx, t.idx + len(t.text), t.text, phones))
+            out.append((t.idx - sent_start, t.idx - sent_start + len(t.text), t.text, phones))
+    
     return out
 
 def preprocess_text(text: str) -> str:
@@ -145,10 +177,12 @@ def preprocess_text(text: str) -> str:
                 new_chunks.append(text[last_end:sent_start])
 
             # Collect heteronym replacements (relative to sent)
-            het_repls = _heteronym_candidates(sent_text)
+            het_rel = _heteronym_candidates(sent_text)
+            het_repls = [(sent_start + s, sent_start + e, o, ph) for s, e, o, ph in het_rel]
 
             # Collect proper noun candidates (relative to sent)
-            propn_repls = _proper_noun_candidates(sent)
+            propn_rel = _proper_noun_candidates(sent)
+            propn_repls = [(sent_start + s, sent_start + e, o, ph) for s, e, o, ph in propn_rel]
 
             # Filter propn if overlaps with het
             het_spans = [(s, e) for s, e, _, _ in het_repls]
@@ -157,10 +191,8 @@ def preprocess_text(text: str) -> str:
                 if not any(h_s < p_e and h_e > p_s for h_s, h_e in het_spans):
                     filtered_propn.append((p_s, p_e, p_orig, p_phones))
 
-            # Combine, make absolute starts, sort by start
-            all_repls = [
-                (sent_start + s, sent_start + e, o, ph) for s, e, o, ph in het_repls + filtered_propn
-            ]
+            # Combine, sort by start
+            all_repls = het_repls + filtered_propn
             all_repls.sort(key=lambda x: x[0])
 
             if not all_repls:
