@@ -58,10 +58,21 @@ def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
     """Task function to run in thread"""
 
     import torch
+    from text_preprocess import preprocess_text  # Import here to avoid global load issues
+
     logger.info(f"[{job_id}] Starting inference task")
 
     with jobs_lock:
         jobs[job_id]['status'] = 'started'
+
+    # Preprocess text for heteronyms and proper names
+    try:
+        original_text = text
+        text = preprocess_text(text)
+        logger.info(f"[{job_id}] Preprocessed text: '{text[:50]}...' (original: '{original_text[:50]}...')")
+    except Exception as e:
+        logger.warning(f"[{job_id}] Text preprocessing failed: {str(e)}. Using original text.")
+        text = original_text
 
     fd, res_wav_path = tempfile.mkstemp(suffix='.wav')
     try:
