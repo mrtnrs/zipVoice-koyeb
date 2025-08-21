@@ -48,26 +48,43 @@ PREDEFINED_VOICES = {
 
 def run_inference(cmd):
     """Run the inference command and handle output"""
+    logger.info(f"Executing command: {' '.join(cmd)}")  # Added log for command
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise Exception(f"Inference failed: {result.stderr}")
     elif result.stderr:
         logger.warning(f"Inference warnings: {result.stderr}")
+    logger.info("Inference command completed successfully")
 
 def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
     """Task function to run in thread"""
+    logger.info(f"[{job_id}] Entered inference_task function")  # Added: Log entry to task
 
-    import torch
-    from text_preprocess import preprocess_text  # Import here to avoid global load issues
+    try:
+        logger.info(f"[{job_id}] Attempting to import torch")
+        import torch
+        logger.info(f"[{job_id}] Imported torch successfully")
 
-    logger.info(f"[{job_id}] Starting inference task")
+        logger.info(f"[{job_id}] Attempting to import preprocess_text (this may load models)")
+        from text_preprocess import preprocess_text
+        logger.info(f"[{job_id}] Imported preprocess_text successfully (models should be loaded)")
+    except Exception as e:
+        logger.error(f"[{job_id}] Import failure: {str(e)}")
+        with jobs_lock:
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['exc_info'] = str(e)
+        return  # Exit task early
+
+    logger.info(f"[{job_id}] Starting inference task")  # Existing log
 
     with jobs_lock:
         jobs[job_id]['status'] = 'started'
+    logger.info(f"[{job_id}] Job status set to 'started'")
 
     # Preprocess text for heteronyms and proper names
     try:
         original_text = text
+        logger.info(f"[{job_id}] Starting text preprocessing")
         text = preprocess_text(text)
         logger.info(f"[{job_id}] Preprocessed text: '{text[:50]}...' (original: '{original_text[:50]}...')")
     except Exception as e:
@@ -99,6 +116,7 @@ def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
         logger.info(f"[{job_id}] Running inference command")
         run_inference(cmd)
 
+        logger.info(f"[{job_id}] Reading generated WAV file")
         with open(res_wav_path, "rb") as f:
             wav_bytes = f.read()
 
@@ -116,6 +134,7 @@ def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
         os.close(fd)
         if os.path.exists(res_wav_path):
             os.remove(res_wav_path)
+        logger.info(f"[{job_id}] Cleaned up temporary files")
 
 
 @app.post("/tts", status_code=status.HTTP_202_ACCEPTED)

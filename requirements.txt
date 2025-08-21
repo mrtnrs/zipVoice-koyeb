@@ -36,3 +36,4 @@ redis
 git+https://github.com/ionite34/h2p-parser.git
 spacy>=3.7.4
 g2p-en
+nltk
