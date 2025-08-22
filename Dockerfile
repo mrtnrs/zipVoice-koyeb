@@ -9,7 +9,7 @@ ENV HF_ENDPOINT=https://hf-mirror.com
 ENV HF_HOME=/tmp/huggingface_cache
 ENV NLTK_DATA=/usr/share/nltk_data
 
-# Install system dependencies
+# Install system dependencies including ffmpeg for pydub
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     wget \
@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3.10-venv \
     python3-pip \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip

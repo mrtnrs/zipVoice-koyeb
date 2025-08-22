@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from pydub import AudioSegment
+from text_preprocess import preprocess_text, _NLP  # Import _NLP for segmentation
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -56,8 +58,39 @@ def run_inference(cmd):
         logger.warning(f"Inference warnings: {result.stderr}")
     logger.info("Inference command completed successfully")
 
+def segment_text(text, max_chars=400):
+    """
+    Segment text into chunks based on natural boundaries using spaCy for accurate splitting.
+    Returns list of chunks, preserving paragraph structure for pause decisions.
+    max_chars: approximate character limit per chunk (adjust based on TTS performance; ~400 chars ≈ 20-30s audio)
+    """
+    doc = _NLP(text)
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    for sent in doc.sents:
+        sentence = sent.text.strip()
+        if not sentence:
+            continue
+        
+        if current_length + len(sentence) <= max_chars:
+            current_chunk.append(sentence)
+            current_length += len(sentence) + 1  # +1 for space
+        else:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+            current_chunk = [sentence]
+            current_length = len(sentence)
+    
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    
+    logger.debug(f"Segmented text into {len(chunks)} chunks")
+    return chunks
+
 def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
-    """Task function to run in thread"""
+    """Task function to run in thread with chunking support"""
     logger.info(f"[{job_id}] Entered inference_task function")  # Added: Log entry to task
 
     try:
@@ -75,13 +108,14 @@ def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
             jobs[job_id]['exc_info'] = str(e)
         return  # Exit task early
 
-    logger.info(f"[{job_id}] Starting inference task")  # Existing log
+    logger.info(f"[{job_id}] Starting inference task with chunking")  # Existing log
 
     with jobs_lock:
         jobs[job_id]['status'] = 'started'
+        jobs[job_id]['progress'] = 'Preprocessing text'
     logger.info(f"[{job_id}] Job status set to 'started'")
 
-    # Preprocess text for heteronyms and proper names
+    # Preprocess the entire text first
     try:
         original_text = text
         logger.info(f"[{job_id}] Starting text preprocessing")
@@ -91,50 +125,100 @@ def inference_task(job_id, voice_info, text, model_name, use_onnx, voice_name):
         logger.warning(f"[{job_id}] Text preprocessing failed: {str(e)}. Using original text.")
         text = original_text
 
-    fd, res_wav_path = tempfile.mkstemp(suffix='.wav')
-    try:
-        # Build the inference command
-        module = "zipvoice.bin.infer_zipvoice_onnx" if use_onnx else "zipvoice.bin.infer_zipvoice"
-        cmd = [
-            sys.executable, "-m", module,
-            "--model-name", model_name,
-            "--prompt-text", voice_info["transcription"],
-            "--prompt-wav", voice_info["wav_path"],
-            "--text", text,
-            "--res-wav-path", res_wav_path
-        ]
+    # Segment the text into chunks
+    chunks = segment_text(text)
+    logger.info(f"[{job_id}] Split text into {len(chunks)} chunks")
+    
+    with jobs_lock:
+        jobs[job_id]['total_chunks'] = len(chunks)
+        jobs[job_id]['progress'] = f"0/{len(chunks)} chunks processed"
 
-        cuda_available = torch.cuda.is_available()
-        if cuda_available:
-            if use_onnx:
-                logger.info(f"[{job_id}] CUDA available, but ONNX path defaults to CPU (no provider flag supported)")
+    # Generate audio for each chunk
+    audio_chunks = []
+    
+    for i, chunk in enumerate(chunks):
+        logger.info(f"[{job_id}] Processing chunk {i+1}/{len(chunks)}: '{chunk[:50]}...'")
+        
+        fd, res_wav_path = tempfile.mkstemp(suffix='.wav')
+        try:
+            # Build the inference command for this chunk
+            module = "zipvoice.bin.infer_zipvoice_onnx" if use_onnx else "zipvoice.bin.infer_zipvoice"
+            cmd = [
+                sys.executable, "-m", module,
+                "--model-name", model_name,
+                "--prompt-text", voice_info["transcription"],
+                "--prompt-wav", voice_info["wav_path"],
+                "--text", chunk,
+                "--res-wav-path", res_wav_path
+            ]
+
+            cuda_available = torch.cuda.is_available()
+            if cuda_available:
+                if use_onnx:
+                    logger.info(f"[{job_id}] CUDA available, but ONNX path defaults to CPU (no provider flag supported)")
+                else:
+                    logger.info(f"[{job_id}] CUDA available; PyTorch path should use it automatically")
             else:
-                logger.info(f"[{job_id}] CUDA available; PyTorch path should use it automatically")
-        else:
-            logger.info(f"[{job_id}] CUDA not available, using CPU")
+                logger.info(f"[{job_id}] CUDA not available, using CPU")
 
-        logger.info(f"[{job_id}] Running inference command")
-        run_inference(cmd)
+            logger.info(f"[{job_id}] Running inference for chunk {i+1}")
+            run_inference(cmd)
 
-        logger.info(f"[{job_id}] Reading generated WAV file")
-        with open(res_wav_path, "rb") as f:
-            wav_bytes = f.read()
+            logger.info(f"[{job_id}] Loading generated WAV for chunk {i+1}")
+            audio_segment = AudioSegment.from_wav(res_wav_path)
+            audio_chunks.append(audio_segment)
+            
+            # Update progress
+            with jobs_lock:
+                jobs[job_id]['progress'] = f"{i+1}/{len(chunks)} chunks processed"
+                
+        except Exception as e:
+            logger.error(f"[{job_id}] Chunk {i+1} failed: {str(e)}")
+            # If a chunk fails, use a short silence as placeholder
+            audio_chunks.append(AudioSegment.silent(duration=1000))  # 1 second silence
+        finally:
+            os.close(fd)
+            if os.path.exists(res_wav_path):
+                os.remove(res_wav_path)
+            logger.debug(f"[{job_id}] Cleaned up temp file for chunk {i+1}")
 
+    # Combine all audio chunks with pauses (250ms between sentences for flow)
+    logger.info(f"[{job_id}] Combining {len(audio_chunks)} audio chunks")
+    
+    if not audio_chunks:
+        logger.error(f"[{job_id}] No audio chunks generated")
         with jobs_lock:
-            jobs[job_id]['status'] = 'finished'
-            jobs[job_id]['wav_bytes'] = wav_bytes
-            jobs[job_id]['voice_name'] = voice_name
-        logger.info(f"[{job_id}] Inference task completed successfully")
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['exc_info'] = "No audio chunks generated"
+        return
+        
+    # Start with the first chunk
+    combined_audio = audio_chunks[0]
+    
+    # Add subsequent chunks with pauses
+    for i in range(1, len(audio_chunks)):
+        pause_duration = 250  # milliseconds; could vary if paragraph detection added
+        logger.debug(f"[{job_id}] Adding {pause_duration}ms pause before chunk {i+1}")
+        combined_audio += AudioSegment.silent(duration=pause_duration)
+        combined_audio += audio_chunks[i]
+    
+    # Export to bytes
+    try:
+        buffer = io.BytesIO()
+        combined_audio.export(buffer, format="wav")
+        wav_bytes = buffer.getvalue()
     except Exception as e:
-        logger.error(f"[{job_id}] Inference task failed: {str(e)}")
+        logger.error(f"[{job_id}] Audio export failed: {str(e)}")
         with jobs_lock:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['exc_info'] = str(e)
-    finally:
-        os.close(fd)
-        if os.path.exists(res_wav_path):
-            os.remove(res_wav_path)
-        logger.info(f"[{job_id}] Cleaned up temporary files")
+        return
+
+    with jobs_lock:
+        jobs[job_id]['status'] = 'finished'
+        jobs[job_id]['wav_bytes'] = wav_bytes
+        jobs[job_id]['voice_name'] = voice_name
+    logger.info(f"[{job_id}] Audio generation completed successfully")
 
 
 @app.post("/tts", status_code=status.HTTP_202_ACCEPTED)
@@ -168,7 +252,7 @@ async def generate_tts(
     # Create job in memory
     job_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {'status': 'queued'}
+        jobs[job_id] = {'status': 'queued', 'progress': 'Waiting to start', 'total_chunks': 0}
 
     # Submit to executor
     executor.submit(inference_task, job_id, voice_info, text, model_name, use_onnx, voice_name)
@@ -189,7 +273,13 @@ async def get_job_result(job_id: str):
         raise HTTPException(status_code=500, detail=f"Job failed: {job.get('exc_info', 'Unknown error')}")
 
     if status != 'finished':
-        return JSONResponse({"status": status})
+        progress = job.get('progress', 'Unknown')
+        total_chunks = job.get('total_chunks', 0)
+        return JSONResponse({
+            "status": status,
+            "progress": progress,
+            "total_chunks": total_chunks
+        })
 
     # Job is finished: stream the result and cleanup
     wav_bytes = job['wav_bytes']

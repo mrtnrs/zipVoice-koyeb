@@ -5,6 +5,9 @@ from typing import List, Dict, Tuple
 import spacy
 from h2p_parser.h2p import H2p
 from g2p_en import G2p
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Load once (safe for a single-process server; if you fork/workers, do this in worker init)
 _NLP = spacy.load("en_core_web_sm", disable=["parser", "ner", "lemmatizer"])
@@ -63,7 +66,9 @@ _PHONEME_RE = re.compile(r"\{([A-Z0-2 ]+)\}")
 
 def _phone_to_graph(phone: str) -> str:
     """Map ARPAbet phone (without stress) to grapheme."""
-    return _PHONE_MAP.get(phone, phone)  # Fallback to phone itself if unknown
+    graph = _PHONE_MAP.get(phone, phone)  # Fallback to phone itself if unknown
+    logger.debug(f"Mapping phone '{phone}' to grapheme '{graph}'")
+    return graph
 
 def _respell_phones(phones: str, orig: str) -> str:
     """Convert ARPAbet phones to respelled word with validation."""
@@ -75,6 +80,7 @@ def _respell_phones(phones: str, orig: str) -> str:
         graph = _PHONE_MAP.get(base_phone)
         if graph is None:
             # Fall back to original word if unknown phone
+            logger.warning(f"Unknown phone '{base_phone}' in '{phones}' for word '{orig}'; falling back to original")
             return orig
         graphemes.append(graph)
     
@@ -82,21 +88,25 @@ def _respell_phones(phones: str, orig: str) -> str:
     
     # Validate the respelling has vowels
     if not any(vowel in new_word.lower() for vowel in 'aeiouy'):
+        logger.debug(f"Respelling '{new_word}' for '{orig}' has no vowels; falling back to original")
         return orig
         
     # Limit length expansion
     if len(new_word) > len(orig) * 1.5:
+        logger.debug(f"Respelling '{new_word}' for '{orig}' too long; falling back to original")
         return orig
         
     # Preserve case
     if orig.isupper():
-        return new_word.upper()
+        new_word = new_word.upper()
     elif orig.istitle():
-        return new_word.capitalize()
+        new_word = new_word.capitalize()
     elif orig.islower():
-        return new_word.lower()
-    else:
-        return new_word  # Keep as is for mixed case
+        new_word = new_word.lower()
+    # Keep as is for mixed case
+    
+    logger.info(f"Respelled '{orig}' to '{new_word}' using phones '{phones}'")
+    return new_word
 
 def _heteronym_candidates(sent_text: str) -> List[Tuple[int, int, str, str]]:
     """
@@ -105,6 +115,7 @@ def _heteronym_candidates(sent_text: str) -> List[Tuple[int, int, str, str]]:
     """
     doc = _NLP(sent_text)
     repl = _H2P.replace_het(sent_text)
+    logger.debug(f"Sentence: '{sent_text}' -> Replaced: '{repl}'")
     
     # Get all alpha tokens with their positions
     words = [(t.idx, t.idx + len(t.text), t.text) for t in doc if t.is_alpha]
@@ -129,6 +140,7 @@ def _heteronym_candidates(sent_text: str) -> List[Tuple[int, int, str, str]]:
         if target_word_idx < len(words):
             start, end, orig = words[target_word_idx]
             out.append((start, end, orig, phones))
+            logger.info(f"Detected heteronym: '{orig}' at [{start}:{end}] with phones '{phones}'")
     
     return out
 
@@ -136,34 +148,38 @@ def _proper_noun_candidates(sent: spacy.tokens.Span) -> List[Tuple[int, int, str
     """
     Returns sentence-relative spans for proper nouns with filtering.
     """
-    out: List[Tuple[int, int, str, str]] = []
-    sent_start = sent.start_char
+    # Disabled to avoid mispronunciations of names
+    return []
+    # out: List[Tuple[int, int, str, str]] = []
+    # sent_start = sent.start_char
     
-    # Common words that shouldn't be respelled even if tagged as PROPN
-    COMMON_PROPN = {"the", "and", "of", "for", "in", "on", "at", "to", "by"}
+    # # Common words that shouldn't be respelled even if tagged as PROPN
+    # COMMON_PROPN = {"the", "and", "of", "for", "in", "on", "at", "to", "by"}
     
-    for t in sent:
-        # Expanded check for proper nouns with punctuation
-        if (t.pos_ == "PROPN" and 
-            re.fullmatch(r"[A-Za-z][A-Za-z'\-]*", t.text) and
-            t.text.lower() not in COMMON_PROPN and
-            len(t.text) >= 3):  # Skip very short proper nouns
+    # for t in sent:
+    #     # Expanded check for proper nouns with punctuation
+    #     if (t.pos_ == "PROPN" and 
+    #         re.fullmatch(r"[A-Za-z][A-Za-z'\-]*", t.text) and
+    #         t.text.lower() not in COMMON_PROPN and
+    #         len(t.text) >= 3):  # Skip very short proper nouns
             
-            phones_list = _G2P(t.text.lower())
-            phones = ' '.join(phones_list)
-            out.append((t.idx - sent_start, t.idx - sent_start + len(t.text), t.text, phones))
+    #         phones_list = _G2P(t.text.lower())
+    #         phones = ' '.join(phones_list)
+    #         out.append((t.idx - sent_start, t.idx - sent_start + len(t.text), t.text, phones))
+    #         logger.info(f"Detected proper noun: '{t.text}' with phones '{phones}'")
     
-    return out
+    # return out
 
 def preprocess_text(text: str) -> str:
     """
     Preprocess text: 
     1) Split into sentences (spaCy).
     2) For each sentence, detect and respell heteronyms (context-aware via h2p).
-    3) Detect and respell proper nouns (names/locations via spaCy POS and g2p-en).
+    3) Detect and respell proper nouns (names/locations via spaCy POS and g2p-en). [DISABLED]
     Prioritize heteronym respellings if overlap.
     """
     try:
+        logger.info(f"Starting preprocessing for text: '{text[:100]}...'")
         doc = _NLP(text)
         new_chunks: List[str] = []
         last_end = 0
@@ -180,16 +196,16 @@ def preprocess_text(text: str) -> str:
             het_rel = _heteronym_candidates(sent_text)
             het_repls = [(sent_start + s, sent_start + e, o, ph) for s, e, o, ph in het_rel]
 
-            # Collect proper noun candidates (relative to sent)
-            propn_rel = _proper_noun_candidates(sent)
-            propn_repls = [(sent_start + s, sent_start + e, o, ph) for s, e, o, ph in propn_rel]
+            # Collect proper noun candidates (relative to sent) [DISABLED]
+            # propn_rel = _proper_noun_candidates(sent)
+            # propn_repls = [(sent_start + s, sent_start + e, o, ph) for s, e, o, ph in propn_rel]
 
-            # Filter propn if overlaps with het
+            # Filter propn if overlaps with het [DISABLED]
             het_spans = [(s, e) for s, e, _, _ in het_repls]
-            filtered_propn = []
-            for p_s, p_e, p_orig, p_phones in propn_repls:
-                if not any(h_s < p_e and h_e > p_s for h_s, h_e in het_spans):
-                    filtered_propn.append((p_s, p_e, p_orig, p_phones))
+            filtered_propn = []  # Empty since disabled
+            # for p_s, p_e, p_orig, p_phones in propn_repls:
+            #     if not any(h_s < p_e and h_e > p_s for h_s, h_e in het_spans):
+            #         filtered_propn.append((p_s, p_e, p_orig, p_phones))
 
             # Combine, sort by start
             all_repls = het_repls + filtered_propn
@@ -222,9 +238,10 @@ def preprocess_text(text: str) -> str:
         if last_end < len(text):
             new_chunks.append(text[last_end:])
 
-        return "".join(new_chunks)
+        processed_text = "".join(new_chunks)
+        logger.info(f"Preprocessing completed. Processed text: '{processed_text[:100]}...'")
+        return processed_text
     except Exception as e:
         # Fallback to original on any error
-        import logging
-        logging.warning(f"preprocess_text failed: {str(e)}")
+        logger.warning(f"preprocess_text failed: {str(e)}")
         return text
